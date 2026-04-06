@@ -1,2 +1,2 @@
 # browsea
-Corporate Browser
+A Corporate Browser
