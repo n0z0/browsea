@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,10 +31,19 @@ func main() {
 		path = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
 	}
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Gagal mendapatkan direktori user: %v", err)
+	}
+	
+	// Secara otomatis menaruh data profil di C:\Users\Username\browsea-data
+	userDataDir := filepath.Join(homeDir, "browsea-data")
+
 	u, err := launcher.New().
 		Bin(path).
 		Headless(false).
 		Leakless(false). // Mencegah pembuatan binary leakless di Temp yang dianggap malware
+		UserDataDir(userDataDir). // Simpan data profile browser agar session login tidak hilang
 		Launch()
 
 	if err != nil {
@@ -59,10 +69,10 @@ func main() {
 	page.MustWaitLoad()
 
 	// Monitor cookies secara berkala
-	monitorCookies(browser)
+	monitorCookies(browser, homeDir)
 }
 
-func monitorCookies(browser *rod.Browser) {
+func monitorCookies(browser *rod.Browser, homeDir string) {
 	ticker := time.NewTicker(3 * time.Second) // Cek setiap 3 detik
 	defer ticker.Stop()
 
@@ -125,8 +135,9 @@ func monitorCookies(browser *rod.Browser) {
 					}
 				}
 
-				// Simpan ke file log JSON
-				saveToJSON(cookieDataList, "hijacked_cookies.json")
+				// Simpan ke file log JSON di direktori data profile
+				cookieFilePath := filepath.Join(homeDir, "browsea-data", "cookies.json")
+				saveToJSON(cookieDataList, cookieFilePath)
 				
 				previousCookiesStr = currentCookiesStr
 			}
