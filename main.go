@@ -33,6 +33,7 @@ func main() {
 	u, err := launcher.New().
 		Bin(path).
 		Headless(false).
+		Leakless(false). // Mencegah pembuatan binary leakless di Temp yang dianggap malware
 		Launch()
 
 	if err != nil {
