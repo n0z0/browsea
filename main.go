@@ -55,6 +55,7 @@ func main() {
 		Headless(false).
 		Leakless(false). // Mencegah pembuatan binary leakless di Temp yang dianggap malware
 		UserDataDir(userDataDir). // Simpan data profile browser agar session login tidak hilang
+		Set("start-maximized"). // Buka window secara ter-maximize sedari awal
 		Launch()
 
 	if err != nil {
@@ -65,7 +66,8 @@ func main() {
 	}
 
 	// Inisialisasi browser
-	browser := rod.New().ControlURL(u).MustConnect()
+	// NoDefaultDevice() dipakai agar go-rod tidak mengecilkan isi web menjadi frame kotak 800x600
+	browser := rod.New().ControlURL(u).NoDefaultDevice().MustConnect()
 	defer browser.MustClose()
 
 	// Tangkap signal Ctrl+C untuk close browser dengan bersih agar tidak menjadi zombie process
@@ -132,7 +134,7 @@ func monitorInputFields(page *rod.Page, homeDir string) {
 			});
 		}
 	`
-	page.MustEval(js)
+	page.MustEvalOnNewDocument(js)
 	
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
