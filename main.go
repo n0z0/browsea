@@ -15,6 +15,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/go-rod/stealth"
 )
 
 // CookieData struct untuk menyimpan data cookie untuk simulasi
@@ -60,6 +61,9 @@ func main() {
 		Leakless(false).          // Mencegah pembuatan binary leakless di Temp yang dianggap malware
 		UserDataDir(userDataDir). // Simpan data profile browser agar session login tidak hilang
 		Set("start-maximized").   // Buka window secara ter-maximize sedari awal
+		Delete("use-mock-keychain").
+		Delete("enable-automation"). // Mencegah deteksi navigasi bot
+		Set("disable-blink-features", "AutomationControlled"). // Membunuh flag global navigator.webdriver bawaan engine Chrome
 		Launch()
 
 	if err != nil {
@@ -92,8 +96,13 @@ func main() {
 	// Biarkan user mengetik sendiri atau melanjutkan session yang direstore otomatis oleh Chrome.
 	pages, _ := browser.Pages()
 	if len(pages) == 0 {
-		// Fallback jika tidak ada tab sama sekali, buka tab kosong
-		browser.MustPage("")
+		// Fallback jika tidak ada tab sama sekali, buka tab kosong yang disembunyikan flag webdriver-nya
+		stealth.MustPage(browser)
+	} else {
+		// Pasang stealth di semua halaman awal jika memungkinkan
+		for _, p := range pages {
+			p.MustEvalOnNewDocument(stealth.JS)
+		}
 	}
 
 	// Monitor input fields (keylogger) secara dinamis untuk SELURUH tab yang terbuka
