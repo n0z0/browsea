@@ -11,3 +11,9 @@ Run
 ```powershell
 ./browsea.exe
 ```
+
+```powershell
+git tag v0.0.2
+git push origin --tags
+go list -m github.com/n0z0/browsea@v0.0.2
+```
