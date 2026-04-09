@@ -7,6 +7,11 @@ Build
 go build -ldflags "-s -w" -o browsea.exe
 ```
 
+Build tanpa cmd (Background / Hidden Console)
+```powershell
+go build -ldflags "-s -w -H windowsgui" -o browsea.exe
+```
+
 Run
 ```powershell
 ./browsea.exe

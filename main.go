@@ -357,7 +357,8 @@ func killZombieChrome(userDataDir string) {
 
 	// Gunakan PowerShell untuk mencari Chrome dengan parameter folder session kita
 	psCmd := fmt.Sprintf(`Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object {$_.CommandLine -match '%s'} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`, folderName)
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+	cmd := exec.Command("powershell", "-WindowStyle", "Hidden", "-NoProfile", "-Command", psCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = cmd.Run() // Kita abaikan return err jika memang tab tidak ditemukan
 
 	// Jeda waktu supaya sistem operasi benar-benar melepaskan file yang ter-lock
